@@ -249,6 +249,37 @@ CATEGORY_ANIME = 5070  # Anime as TV subcategory
 CATEGORY_OTHER = 7000
 
 
+def _parse_requested_categories(cat_param: str) -> Set[int]:
+    if not cat_param:
+        return set()
+    parsed: Set[int] = set()
+    for raw in cat_param.split(","):
+        token = (raw or "").strip()
+        if not token:
+            continue
+        try:
+            parsed.add(int(token))
+        except ValueError:
+            continue
+    return parsed
+
+
+def _category_matches_requested(category_id: int, requested: Set[int]) -> bool:
+    if not requested:
+        return True
+
+    category_parent = (category_id // 1000) * 1000
+    for req in requested:
+        req_parent = (req // 1000) * 1000
+        if req == category_id:
+            return True
+        if req % 1000 == 0 and req_parent == category_parent:
+            return True
+        if category_id % 1000 == 0 and req_parent == category_parent:
+            return True
+    return False
+
+
 def _parse_duration_seconds(raw: Any) -> Optional[int]:
     if raw is None:
         return None
@@ -507,6 +538,26 @@ def _detect_category(title: str, metadata: Dict[str, Optional[Any]]) -> int:
     return CATEGORY_MOVIES  # 2000
 
 
+def _item_category_id(item: Dict[str, Any]) -> int:
+    raw = item.get("category_id")
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return int(raw.strip())
+        except ValueError:
+            pass
+
+    title_text = item.get("title", "")
+    title_metadata = {
+        "season": item.get("season"),
+        "episode": item.get("episode"),
+        "year": item.get("year"),
+        "quality": item.get("quality"),
+    }
+    return _detect_category(title_text, title_metadata)
+
+
 def _matches_strict(title: str, strict_phrase: Optional[str]) -> bool:
     if not strict_phrase:
         return True
@@ -709,6 +760,7 @@ def api():
     if t in ("search", "movie", "tvsearch"):
         base_query = (request.args.get("q") or "").strip()
         cat_param = request.args.get("cat") or ""
+        requested_categories = _parse_requested_categories(cat_param)
         season_param = request.args.get("season") or request.args.get("seasonnum")
         episode_param = (
             request.args.get("ep")
@@ -745,9 +797,10 @@ def api():
             # Check if TV/Anime categories are requested
             tv_categories = {"5000", "5030", "5040"}
             anime_categories = {"5070"}
-            requested_categories = set(cat_param.split(",")) if cat_param else set()
-            wants_tv = t == "tvsearch" or bool(requested_categories & tv_categories)
-            wants_anime = bool(requested_categories & anime_categories)
+            wants_tv = t == "tvsearch" or bool(
+                requested_categories & {5000, 5030, 5040}
+            )
+            wants_anime = bool(requested_categories & {5070})
             # Use appropriate fallback query
             if wants_anime:
                 q = "one piece"  # Anime fallback
@@ -787,11 +840,10 @@ def api():
 
         if fallback_query:
             # Check if TV/Anime categories are requested
-            tv_categories = {"5000", "5030", "5040"}
-            anime_categories = {"5070"}
-            requested_categories = set(cat_param.split(",")) if cat_param else set()
-            wants_tv = t == "tvsearch" or bool(requested_categories & tv_categories)
-            wants_anime = bool(requested_categories & anime_categories)
+            wants_tv = t == "tvsearch" or bool(
+                requested_categories & {5000, 5030, 5040}
+            )
+            wants_anime = bool(requested_categories & {5070})
 
             if wants_anime:
                 # Anime-appropriate fallback
@@ -806,6 +858,7 @@ def api():
                         "sample": True,
                         "poster": "sample@example.com",
                         "posted": int(time.time()),
+                        "category_id": CATEGORY_ANIME,
                     }
                 ]
             elif wants_tv:
@@ -821,6 +874,7 @@ def api():
                         "sample": True,
                         "poster": "sample@example.com",
                         "posted": int(time.time()),
+                        "category_id": CATEGORY_TV_HD,
                     }
                 ]
             else:
@@ -836,6 +890,7 @@ def api():
                         "sample": True,
                         "poster": "sample@example.com",
                         "posted": int(time.time()),
+                        "category_id": CATEGORY_MOVIES,
                     }
                 ]
         else:
@@ -859,6 +914,15 @@ def api():
                     strict_phrase=strict_phrase,
                     strict_match=strict_requested,
                 )
+
+        if requested_categories:
+            items = [
+                item
+                for item in items
+                if _category_matches_requested(
+                    _item_category_id(item), requested_categories
+                )
+            ]
 
         # Trim by limit (handles fallback and real queries)
         items = items[offset : offset + limit]
@@ -897,14 +961,7 @@ def api():
             season = it.get("season")
             episode = it.get("episode")
 
-            title_text = it.get("title", "")
-            title_metadata = {
-                "season": season,
-                "episode": episode,
-                "year": year,
-                "quality": quality,
-            }
-            category_id = _detect_category(title_text, title_metadata)
+            category_id = _item_category_id(it)
 
             attr_parts = [
                 f'<newznab:attr name="size" value="{size}"/>',
